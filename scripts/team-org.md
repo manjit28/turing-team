@@ -9,8 +9,7 @@ graph TD
     Ada --> Franklin["<b>Franklin</b><br/>Executive Assistant<br/><i>pulse</i>"]
     Ada --> Shannon["<b>Shannon</b><br/>Knowledge Curator<br/><i>scribe</i>"]
     Ada --> Skinner["<b>Skinner</b><br/>Social &amp; Personal Manager<br/><i>echo</i>"]
-    Ada --> Alpha["<b>Alpha</b><br/>Intraday Trader<br/><i>intraday-trader</i>"]
-
+    
     Turing --> Ritchie["<b>Ritchie</b><br/>Software Engineer<br/><i>coder</i>"]
     Turing --> Liskov["<b>Liskov</b><br/>QA Engineer<br/><i>tester</i>"]
 
