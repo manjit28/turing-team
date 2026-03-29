@@ -1,136 +1,217 @@
-"""
-File handling utility for the agent system.
-
-This module provides a FileHandler class for reading and writing text and JSON files
-with robust error handling and logging.
-"""
-
 import os
 import json
 import logging
+import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Optional, Any, Union
+from contextlib import contextmanager
 
+# Configure logging
 logger = logging.getLogger("agent_system")
 
 class FileHandlerError(Exception):
-    """Custom exception for file handling errors."""
+    """Base exception for FileHandler errors."""
+    pass
+
+class PathValidationError(FileHandlerError):
+    """Raised when a path is invalid or outside allowed boundaries."""
     pass
 
 class FileHandler:
-    """A utility class for file operations with error handling and logging."""
+    """Thread-safe file I/O helper with robust error handling and logging."""
     
-    def __init__(self, base_dir: Union[str, Path] = None):
+    def __init__(self, base_path: Optional[str] = None):
         """
-        Initialize the FileHandler with an optional base directory.
+        Initialize FileHandler with optional base path.
         
         Args:
-            base_dir: Base directory for file operations. Defaults to project root.
+            base_path: Base directory for all file operations. Defaults to current working directory.
         """
-        if base_dir is None:
-            self.base_dir = Path.cwd()
-        else:
-            self.base_dir = Path(base_dir)
-    
-    def _resolve_path(self, path: Union[str, Path]) -> Path:
+        self._base_path = Path(base_path) if base_path else Path.cwd()
+        self._lock = threading.Lock()
+        self._max_retries = 3
+        self._retry_backoff = 1.0  # seconds
+        
+    def _validate_path(self, path: str) -> Path:
         """
-        Resolve a path relative to the base directory.
+        Validate and resolve file path relative to base path.
         
         Args:
-            path: Path to resolve
+            path: Path to validate
             
         Returns:
             Resolved Path object
+            
+        Raises:
+            PathValidationError: If path is invalid or outside base path
         """
-        path_obj = Path(path)
-        if not path_obj.is_absolute():
-            path_obj = self.base_dir / path_obj
-        return path_obj
+        try:
+            # Resolve path relative to base
+            resolved_path = (self._base_path / path).resolve()
+            
+            # Check if path is within base directory
+            if not resolved_path.is_relative_to(self._base_path):
+                raise PathValidationError(
+                    f"Path '{path}' is outside the configured base path '{self._base_path}'"
+                )
+                
+            return resolved_path
+        except Exception as e:
+            raise PathValidationError(f"Invalid path '{path}': {str(e)}")
     
-    def read_text(self, path: Union[str, Path]) -> str:
+    def _retry_operation(self, operation, *args, **kwargs):
         """
-        Read text from a file.
+        Execute operation with exponential backoff retry logic.
         
         Args:
-            path: Path to the file
+            operation: Function to execute
+            *args: Arguments for operation
+            **kwargs: Keyword arguments for operation
             
         Returns:
-            Content of the file as string
+            Result of operation
+            
+        Raises:
+            Exception: If all retry attempts fail
+        """
+        last_exception = None
+        
+        for attempt in range(self._max_retries):
+            try:
+                return operation(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                if attempt < self._max_retries - 1:  # Don't sleep on the last attempt
+                    sleep_time = self._retry_backoff * (2 ** attempt)
+                    logger.warning(
+                        f"File operation failed (attempt {attempt + 1}/{self._max_retries}): "
+                        f"{str(e)}. Retrying in {sleep_time:.2f}s..."
+                    )
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(
+                        f"File operation failed after {self._max_retries} attempts: {str(e)}"
+                    )
+                    
+        raise last_exception
+    
+    def read_file(self, path: str, encoding: str = "utf-8") -> str:
+        """
+        Read file content as string.
+        
+        Args:
+            path: Path to file
+            encoding: File encoding (default: utf-8)
+            
+        Returns:
+            File content as string
             
         Raises:
             FileHandlerError: If file cannot be read
         """
-        try:
-            resolved_path = self._resolve_path(path)
-            logger.debug(f"Reading text from {resolved_path}")
-            return resolved_path.read_text(encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Failed to read text file {path}: {type(e).__name__}: {e}", exc_info=True)
-            raise FileHandlerError(f"Failed to read file '{path}': {str(e)}") from e
+        def _read_file_operation():
+            try:
+                resolved_path = self._validate_path(path)
+                with open(resolved_path, 'r', encoding=encoding) as f:
+                    return f.read()
+            except Exception as e:
+                logger.error(f"Failed to read file '{path}': {str(e)}", exc_info=True)
+                raise FileHandlerError(f"Failed to read file '{path}': {str(e)}")
+        
+        return self._retry_operation(_read_file_operation)
     
-    def write_text(self, path: Union[str, Path], content: str) -> None:
+    def write_file(self, path: str, content: str, encoding: str = "utf-8", mode: str = "w") -> None:
         """
-        Write text to a file.
+        Write content to file.
         
         Args:
-            path: Path to the file
+            path: Path to file
             content: Content to write
+            encoding: File encoding (default: utf-8)
+            mode: File mode (default: 'w')
             
         Raises:
             FileHandlerError: If file cannot be written
         """
-        try:
-            resolved_path = self._resolve_path(path)
-            # Create directories if they don't exist
-            resolved_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Writing text to {resolved_path}")
-            resolved_path.write_text(content, encoding='utf-8')
-        except Exception as e:
-            logger.error(f"Failed to write text file {path}: {type(e).__name__}: {e}", exc_info=True)
-            raise FileHandlerError(f"Failed to write file '{path}': {str(e)}") from e
+        def _write_file_operation():
+            try:
+                resolved_path = self._validate_path(path)
+                
+                # Create directory if it doesn't exist
+                resolved_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with self._lock:  # Thread safety
+                    with open(resolved_path, mode, encoding=encoding) as f:
+                        f.write(content)
+                        
+            except Exception as e:
+                logger.error(f"Failed to write file '{path}': {str(e)}", exc_info=True)
+                raise FileHandlerError(f"Failed to write file '{path}': {str(e)}")
+        
+        self._retry_operation(_write_file_operation)
     
-    def read_json(self, path: Union[str, Path]) -> Any:
+    def read_json(self, path: str) -> Any:
         """
-        Read JSON data from a file.
+        Read and parse JSON from file.
         
         Args:
-            path: Path to the JSON file
+            path: Path to JSON file
             
         Returns:
             Parsed JSON data
             
         Raises:
-            FileHandlerError: If file cannot be read or JSON is invalid
+            FileHandlerError: If file cannot be read or parsed
         """
+        content = self.read_file(path)
         try:
-            resolved_path = self._resolve_path(path)
-            logger.debug(f"Reading JSON from {resolved_path}")
-            content = resolved_path.read_text(encoding='utf-8')
             return json.loads(content)
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in file {path}: {e}", exc_info=True)
-            raise FileHandlerError(f"Invalid JSON in file '{path}': {str(e)}") from e
-        except Exception as e:
-            logger.error(f"Failed to read JSON file {path}: {type(e).__name__}: {e}", exc_info=True)
-            raise FileHandlerError(f"Failed to read JSON file '{path}': {str(e)}") from e
+            logger.error(f"Failed to parse JSON from '{path}': {str(e)}")
+            raise FileHandlerError(f"Invalid JSON in file '{path}': {str(e)}")
     
-    def write_json(self, path: Union[str, Path], data: Any) -> None:
+    def write_json(self, path: str, data: Any) -> None:
         """
-        Write JSON data to a file.
+        Write data as JSON to file.
         
         Args:
-            path: Path to the JSON file
-            data: Data to serialize to JSON
+            path: Path to output file
+            data: Data to serialize as JSON
             
         Raises:
             FileHandlerError: If file cannot be written
         """
+        json_content = json.dumps(data, indent=2)
+        self.write_file(path, json_content)
+
+def main():
+    """CLI interface for testing."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="FileHandler CLI")
+    parser.add_argument("--read", help="Read file")
+    parser.add_argument("--write", help="Write file")
+    parser.add_argument("--content", help="Content to write")
+    parser.add_argument("--base-path", help="Base path for operations")
+    
+    args = parser.parse_args()
+    
+    handler = FileHandler(args.base_path)
+    
+    if args.read:
         try:
-            resolved_path = self._resolve_path(path)
-            # Create directories if they don't exist
-            resolved_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Writing JSON to {resolved_path}")
-            resolved_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+            content = handler.read_file(args.read)
+            print(content)
         except Exception as e:
-            logger.error(f"Failed to write JSON file {path}: {type(e).__name__}: {e}", exc_info=True)
-            raise FileHandlerError(f"Failed to write JSON file '{path}': {str(e)}") from e
+            print(f"Error reading {args.read}: {e}")
+    
+    elif args.write and args.content:
+        try:
+            handler.write_file(args.write, args.content)
+            print(f"Wrote to {args.write}")
+        except Exception as e:
+            print(f"Error writing to {args.write}: {e}")
+
+if __name__ == "__main__":
+    main()
