@@ -1,129 +1,136 @@
-'''
-File handler utility for the agent system.
-Provides robust file operations with error handling and logging.
-'''
+"""
+File handling utility for the agent system.
+
+This module provides a FileHandler class for reading and writing text and JSON files
+with robust error handling and logging.
+"""
+
+import os
 import json
 import logging
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
-# Configure logger
 logger = logging.getLogger("agent_system")
-
 
 class FileHandlerError(Exception):
     """Custom exception for file handling errors."""
     pass
 
-
 class FileHandler:
-    """A utility class for handling file operations with robust error handling."""
+    """A utility class for file operations with error handling and logging."""
     
-    def __init__(self, base_dir: Union[str, Path] = "."):
+    def __init__(self, base_dir: Union[str, Path] = None):
         """
-        Initialize the FileHandler with a base directory.
+        Initialize the FileHandler with an optional base directory.
         
         Args:
-            base_dir: Base directory for all file operations. Defaults to current directory.
+            base_dir: Base directory for file operations. Defaults to project root.
         """
-        self.base_dir = Path(base_dir).resolve()
-        
+        if base_dir is None:
+            self.base_dir = Path.cwd()
+        else:
+            self.base_dir = Path(base_dir)
+    
     def _resolve_path(self, path: Union[str, Path]) -> Path:
         """
         Resolve a path relative to the base directory.
         
         Args:
-            path: The file path to resolve.
+            path: Path to resolve
             
         Returns:
-            Resolved absolute path.
+            Resolved Path object
         """
-        return (self.base_dir / path).resolve()
-        
+        path_obj = Path(path)
+        if not path_obj.is_absolute():
+            path_obj = self.base_dir / path_obj
+        return path_obj
+    
     def read_text(self, path: Union[str, Path]) -> str:
         """
-        Read text content from a file.
+        Read text from a file.
         
         Args:
-            path: Path to the file to read.
+            path: Path to the file
             
         Returns:
-            File content as string.
+            Content of the file as string
             
         Raises:
-            FileHandlerError: If file cannot be read.
+            FileHandlerError: If file cannot be read
         """
         try:
             resolved_path = self._resolve_path(path)
-            logger.debug(f"Reading text file: {resolved_path}")
+            logger.debug(f"Reading text from {resolved_path}")
             return resolved_path.read_text(encoding='utf-8')
         except Exception as e:
-            logger.error(f"Failed to read text file '{path}': {str(e)}", exc_info=True)
-            raise FileHandlerError(f"Could not read file '{path}': {str(e)}") from e
-            
+            logger.error(f"Failed to read text file {path}: {type(e).__name__}: {e}", exc_info=True)
+            raise FileHandlerError(f"Failed to read file '{path}': {str(e)}") from e
+    
     def write_text(self, path: Union[str, Path], content: str) -> None:
         """
-        Write text content to a file.
+        Write text to a file.
         
         Args:
-            path: Path to the file to write.
-            content: Content to write to the file.
+            path: Path to the file
+            content: Content to write
             
         Raises:
-            FileHandlerError: If file cannot be written.
+            FileHandlerError: If file cannot be written
         """
         try:
             resolved_path = self._resolve_path(path)
-            # Ensure directory exists
+            # Create directories if they don't exist
             resolved_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Writing text file: {resolved_path}")
+            logger.debug(f"Writing text to {resolved_path}")
             resolved_path.write_text(content, encoding='utf-8')
         except Exception as e:
-            logger.error(f"Failed to write text file '{path}': {str(e)}", exc_info=True)
-            raise FileHandlerError(f"Could not write file '{path}': {str(e)}") from e
-            
+            logger.error(f"Failed to write text file {path}: {type(e).__name__}: {e}", exc_info=True)
+            raise FileHandlerError(f"Failed to write file '{path}': {str(e)}") from e
+    
     def read_json(self, path: Union[str, Path]) -> Any:
         """
-        Read JSON content from a file.
+        Read JSON data from a file.
         
         Args:
-            path: Path to the JSON file to read.
+            path: Path to the JSON file
             
         Returns:
-            Parsed JSON data.
+            Parsed JSON data
             
         Raises:
-            FileHandlerError: If file cannot be read or parsed.
+            FileHandlerError: If file cannot be read or JSON is invalid
         """
         try:
             resolved_path = self._resolve_path(path)
-            logger.debug(f"Reading JSON file: {resolved_path}")
+            logger.debug(f"Reading JSON from {resolved_path}")
             content = resolved_path.read_text(encoding='utf-8')
             return json.loads(content)
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON from file '{path}': {str(e)}", exc_info=True)
+            logger.error(f"Invalid JSON in file {path}: {e}", exc_info=True)
             raise FileHandlerError(f"Invalid JSON in file '{path}': {str(e)}") from e
         except Exception as e:
-            logger.error(f"Failed to read JSON file '{path}': {str(e)}", exc_info=True)
-            raise FileHandlerError(f"Could not read JSON file '{path}': {str(e)}") from e
-            
+            logger.error(f"Failed to read JSON file {path}: {type(e).__name__}: {e}", exc_info=True)
+            raise FileHandlerError(f"Failed to read JSON file '{path}': {str(e)}") from e
+    
     def write_json(self, path: Union[str, Path], data: Any) -> None:
         """
-        Write data to a JSON file.
+        Write JSON data to a file.
         
         Args:
-            path: Path to the JSON file to write.
-            data: Data to serialize to JSON.
+            path: Path to the JSON file
+            data: Data to serialize to JSON
             
         Raises:
-            FileHandlerError: If file cannot be written.
+            FileHandlerError: If file cannot be written
         """
         try:
             resolved_path = self._resolve_path(path)
-            # Ensure directory exists
+            # Create directories if they don't exist
             resolved_path.parent.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Writing JSON file: {resolved_path}")
+            logger.debug(f"Writing JSON to {resolved_path}")
             resolved_path.write_text(json.dumps(data, indent=2), encoding='utf-8')
         except Exception as e:
-            logger.error(f"Failed to write JSON file '{path}': {str(e)}", exc_info=True)
-            raise FileHandlerError(f"Could not write JSON file '{path}': {str(e)}") from e
+            logger.error(f"Failed to write JSON file {path}: {type(e).__name__}: {e}", exc_info=True)
+            raise FileHandlerError(f"Failed to write JSON file '{path}': {str(e)}") from e
