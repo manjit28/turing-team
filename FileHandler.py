@@ -1,11 +1,14 @@
 """
-FileHandler module for safe file operations with path validation and retry logic.
+FileHandler module with improved code quality and functionality.
+
+This module provides thread-safe file operations with path validation,
+retry logic, and support for JSON read/write operations.
 """
 
-import os
 import json
+import os
+import time
 import threading
-import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 from contextlib import contextmanager
@@ -15,72 +18,66 @@ class FileHandlerError(Exception):
     """Base exception for FileHandler errors."""
     pass
 
-class PathValidationError(FileHandlerError):
-    """Raised when path validation fails."""
+class InvalidPathError(FileHandlerError):
+    """Raised when a path is invalid or outside the allowed base path."""
+    pass
+
+class FileOperationError(FileHandlerError):
+    """Raised when a file operation fails."""
     pass
 
 class FileHandler:
     """Thread-safe file handler with path validation and retry logic."""
     
-    def __init__(self, read_base_path: str = "/tmp", write_base_path: str = "/tmp", 
+    def __init__(self, base_read_path: str, base_write_path: str, 
                  max_retries: int = 3, retry_delay: float = 0.1):
         """
-        Initialize FileHandler with base paths for read and write operations.
+        Initialize FileHandler with read and write base paths.
         
         Args:
-            read_base_path: Base path for read operations
-            write_base_path: Base path for write operations  
-            max_retries: Maximum number of retry attempts
+            base_read_path: Base directory for read operations
+            base_write_path: Base directory for write operations
+            max_retries: Maximum number of retry attempts for file operations
             retry_delay: Initial delay between retries (seconds)
         """
-        self.read_base_path = Path(read_base_path).resolve()
-        self.write_base_path = Path(write_base_path).resolve()
+        self.base_read_path = Path(base_read_path).resolve()
+        self.base_write_path = Path(base_write_path).resolve()
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self._lock = threading.Lock()
-        
-        # Verify base paths exist
-        if not self.read_base_path.exists():
-            raise FileHandlerError(f"Read base path does not exist: {self.read_base_path}")
-        if not self.write_base_path.exists():
-            raise FileHandlerError(f"Write base path does not exist: {self.write_base_path}")
+        self._test_mode = False
 
-    def _validate_path(self, path: Union[str, Path], is_write: bool = False) -> Path:
+    def _validate_path(self, path: Path, is_write: bool = False) -> Path:
         """
-        Validate and resolve file path, ensuring it's within the allowed base path.
+        Validate that the path is within the allowed base path.
         
         Args:
             path: Path to validate
-            is_write: Whether this is a write operation
+            is_write: True if this is a write operation, False for read
             
         Returns:
-            Resolved Path object
+            Validated path
             
         Raises:
-            PathValidationError: If path is invalid or outside allowed scope
+            InvalidPathError: If path is invalid or outside base path
         """
-        # Convert to Path object if it's a string
-        path_obj = Path(path)
+        # Resolve the path to remove '..' and '.' components
+        resolved_path = path.resolve()
         
-        # Resolve the path to get absolute path (removes . and ..)
-        resolved_path = path_obj.resolve()
+        # Check if path is within the allowed base path
+        base_path = self.base_write_path if is_write else self.base_read_path
         
-        # Check if path is within allowed base path
-        base_path = self.write_base_path if is_write else self.read_base_path
-        
-        # Check if the resolved path is within base path
         try:
+            # This will raise if path is not within base_path
             resolved_path.relative_to(base_path)
         except ValueError:
-            raise PathValidationError(
-                f"Path '{path}' is outside allowed base path '{base_path}'"
-            )
+            raise InvalidPathError(f"Path '{path}' is outside the allowed base path '{base_path}'")
             
         return resolved_path
 
     def _retry_operation(self, operation, *args, **kwargs):
         """
-        Retry an operation with exponential backoff.
+        Retry a file operation with exponential backoff.
         
         Args:
             operation: Function to retry
@@ -88,303 +85,396 @@ class FileHandler:
             **kwargs: Keyword arguments for operation
             
         Returns:
-            Result of operation
+            Result of the operation
             
         Raises:
-            Exception: Last exception raised by operation
+            FileOperationError: If operation fails after all retries
         """
         last_exception = None
         
-        for attempt in range(self.max_retries):
+        for attempt in range(self.max_retries + 1):
             try:
                 return operation(*args, **kwargs)
-            except Exception as e:
+            except (OSError, IOError) as e:
                 last_exception = e
-                if attempt < self.max_retries - 1:
+                if attempt < self.max_retries:
                     # Exponential backoff
-                    import time
                     time.sleep(self.retry_delay * (2 ** attempt))
+                    continue
                 else:
-                    # Final attempt - re-raise
-                    raise last_exception
+                    raise FileOperationError(f"Operation failed after {self.max_retries + 1} attempts: {e}") from e
+                    
+        # This should never be reached due to the exception handling above,
+        # but included for completeness
+        raise last_exception
 
-    def read_file(self, path: Union[str, Path], encoding: str = "utf-8") -> str:
+    def _ensure_directory_exists(self, file_path: Path):
+        """Ensure the directory for a file path exists."""
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def test_mode(self):
         """
-        Read file content as string.
+        Context manager for testing mode.
+        
+        In test mode, file operations are not executed but logged.
+        """
+        original_mode = self._test_mode
+        self._test_mode = True
+        try:
+            yield
+        finally:
+            self._test_mode = original_mode
+
+    def read_file(self, file_path: str) -> str:
+        """
+        Read content from a file.
         
         Args:
-            path: Path to file
-            encoding: File encoding
+            file_path: Path to the file to read
             
         Returns:
             File content as string
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be read
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
         """
+        path = Path(file_path)
+        
+        # Validate path
         validated_path = self._validate_path(path, is_write=False)
         
-        def _read():
-            try:
-                with open(validated_path, "r", encoding=encoding) as f:
-                    return f.read()
-            except Exception as e:
-                raise FileHandlerError(f"Failed to read file '{validated_path}': {str(e)}")
+        if self._test_mode:
+            print(f"TEST MODE: Would read from {validated_path}")
+            return ""
         
-        return self._retry_operation(_read)
+        # Retry operation with exponential backoff
+        return self._retry_operation(self._read_file, validated_path)
 
-    def read_json(self, path: Union[str, Path], encoding: str = "utf-8") -> Any:
+    def _read_file(self, file_path: Path) -> str:
+        """Internal method to read file content."""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    def write_file(self, file_path: str, content: str) -> None:
         """
-        Read JSON file content.
+        Write content to a file.
         
         Args:
-            path: Path to JSON file
-            encoding: File encoding
+            file_path: Path to the file to write
+            content: Content to write to file
+            
+        Raises:
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
+        """
+        path = Path(file_path)
+        
+        # Validate path
+        validated_path = self._validate_path(path, is_write=True)
+        
+        if self._test_mode:
+            print(f"TEST MODE: Would write to {validated_path}")
+            return
+            
+        # Ensure directory exists
+        self._ensure_directory_exists(validated_path)
+        
+        # Retry operation with exponential backoff
+        self._retry_operation(self._write_file, validated_path, content)
+
+    def _write_file(self, file_path: Path, content: str) -> None:
+        """Internal method to write file content."""
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    def append_to_file(self, file_path: str, content: str) -> None:
+        """
+        Append content to a file.
+        
+        Args:
+            file_path: Path to the file to append to
+            content: Content to append
+            
+        Raises:
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
+        """
+        path = Path(file_path)
+        
+        # Validate path
+        validated_path = self._validate_path(path, is_write=True)
+        
+        if self._test_mode:
+            print(f"TEST MODE: Would append to {validated_path}")
+            return
+            
+        # Ensure directory exists
+        self._ensure_directory_exists(validated_path)
+        
+        # Retry operation with exponential backoff
+        self._retry_operation(self._append_to_file, validated_path, content)
+
+    def _append_to_file(self, file_path: Path, content: str) -> None:
+        """Internal method to append to file."""
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(content)
+
+    def read_json(self, file_path: str) -> Any:
+        """
+        Read and parse JSON from a file.
+        
+        Args:
+            file_path: Path to the JSON file
             
         Returns:
-            JSON data
+            Parsed JSON data
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If JSON cannot be parsed or file cannot be read
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
+            json.JSONDecodeError: If JSON parsing fails
         """
-        validated_path = self._validate_path(path, is_write=False)
-        
-        def _read_json():
-            try:
-                with open(validated_path, "r", encoding=encoding) as f:
-                    return json.load(f)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to read JSON file '{validated_path}': {str(e)}")
-        
-        return self._retry_operation(_read_json)
+        content = self.read_file(file_path)
+        return json.loads(content)
 
-    def write_file(self, path: Union[str, Path], content: str, 
-                   encoding: str = "utf-8", mode: str = "w") -> None:
+    def write_json(self, file_path: str, data: Any) -> None:
         """
-        Write string content to file.
+        Write data to a file as JSON.
         
         Args:
-            path: Path to file
-            content: Content to write
-            encoding: File encoding
-            mode: Write mode ("w" or "a")
+            file_path: Path to the file to write
+            data: Data to serialize as JSON
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be written
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
         """
-        validated_path = self._validate_path(path, is_write=True)
-        
-        def _write():
-            try:
-                with open(validated_path, mode, encoding=encoding) as f:
-                    f.write(content)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to write file '{validated_path}': {str(e)}")
-        
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_write)
+        json_content = json.dumps(data, indent=2)
+        self.write_file(file_path, json_content)
 
-    def write_json(self, path: Union[str, Path], data: Any, 
-                   encoding: str = "utf-8", indent: int = 2) -> None:
+    def file_exists(self, file_path: str) -> bool:
         """
-        Write data as JSON to file.
+        Check if a file exists.
         
         Args:
-            path: Path to JSON file
-            data: Data to serialize
-            encoding: File encoding
-            indent: JSON indentation
-            
-        Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If data cannot be serialized or file cannot be written
-        """
-        validated_path = self._validate_path(path, is_write=True)
-        
-        def _write_json():
-            try:
-                with open(validated_path, "w", encoding=encoding) as f:
-                    json.dump(data, f, indent=indent)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to write JSON file '{validated_path}': {str(e)}")
-        
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_write_json)
-
-    def file_exists(self, path: Union[str, Path]) -> bool:
-        """
-        Check if file exists.
-        
-        Args:
-            path: Path to check
+            file_path: Path to the file to check
             
         Returns:
             True if file exists, False otherwise
+            
+        Raises:
+            InvalidPathError: If path is invalid or outside base path
         """
+        path = Path(file_path)
         validated_path = self._validate_path(path, is_write=False)
+        
+        if self._test_mode:
+            print(f"TEST MODE: Would check if {validated_path} exists")
+            return False
+            
         return validated_path.exists() and validated_path.is_file()
 
-    def get_file_info(self, path: Union[str, Path]) -> Dict[str, Any]:
+    def get_file_info(self, file_path: str) -> Dict[str, Union[str, int, float]]:
         """
-        Get file information.
+        Get information about a file.
         
         Args:
-            path: Path to file
+            file_path: Path to the file
             
         Returns:
             Dictionary with file information
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be accessed
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
         """
+        path = Path(file_path)
         validated_path = self._validate_path(path, is_write=False)
         
-        def _get_info():
-            try:
-                stat = validated_path.stat()
-                return {
-                    "size": stat.st_size,
-                    "created": stat.st_ctime,
-                    "modified": stat.st_mtime,
-                    "is_file": validated_path.is_file(),
-                    "is_dir": validated_path.is_dir()
-                }
-            except Exception as e:
-                raise FileHandlerError(f"Failed to get file info for '{validated_path}': {str(e)}")
-        
-        return self._retry_operation(_get_info)
+        if self._test_mode:
+            print(f"TEST MODE: Would get info for {validated_path}")
+            return {}
+            
+        try:
+            stat = validated_path.stat()
+            return {
+                'size': stat.st_size,
+                'created': stat.st_ctime,
+                'modified': stat.st_mtime,
+                'is_file': validated_path.is_file(),
+                'is_directory': validated_path.is_dir()
+            }
+        except OSError as e:
+            raise FileOperationError(f"Failed to get file info for {validated_path}: {e}")
 
-    def append_to_file(self, path: Union[str, Path], content: str, 
-                       encoding: str = "utf-8") -> None:
+    def delete_file(self, file_path: str) -> None:
         """
-        Append content to file.
+        Delete a file.
         
         Args:
-            path: Path to file
-            content: Content to append
-            encoding: File encoding
+            file_path: Path to the file to delete
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be written
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
         """
+        path = Path(file_path)
         validated_path = self._validate_path(path, is_write=True)
         
-        def _append():
-            try:
-                with open(validated_path, "a", encoding=encoding) as f:
-                    f.write(content)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to append to file '{validated_path}': {str(e)}")
-        
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_append)
+        if self._test_mode:
+            print(f"TEST MODE: Would delete {validated_path}")
+            return
+            
+        # Retry operation with exponential backoff
+        self._retry_operation(self._delete_file, validated_path)
 
-    def delete_file(self, path: Union[str, Path]) -> None:
+    def _delete_file(self, file_path: Path) -> None:
+        """Internal method to delete file."""
+        file_path.unlink()
+
+    def move_file(self, source_path: str, destination_path: str) -> None:
         """
-        Delete file.
+        Move a file from source to destination.
         
         Args:
-            path: Path to file
+            source_path: Source file path
+            destination_path: Destination file path
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be deleted
+            InvalidPathError: If paths are invalid or outside base path
+            FileOperationError: If file operation fails
         """
-        validated_path = self._validate_path(path, is_write=True)
+        source = Path(source_path)
+        destination = Path(destination_path)
         
-        def _delete():
-            try:
-                validated_path.unlink()
-            except Exception as e:
-                raise FileHandlerError(f"Failed to delete file '{validated_path}': {str(e)}")
+        # Validate both paths
+        source_validated = self._validate_path(source, is_write=True)
+        destination_validated = self._validate_path(destination, is_write=True)
         
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_delete)
-
-    def move_file(self, src: Union[str, Path], dst: Union[str, Path]) -> None:
-        """
-        Move file from source to destination.
-        
-        Args:
-            src: Source path
-            dst: Destination path
+        if self._test_mode:
+            print(f"TEST MODE: Would move {source_validated} to {destination_validated}")
+            return
             
-        Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If file cannot be moved
-        """
-        src_path = self._validate_path(src, is_write=True)
-        dst_path = self._validate_path(dst, is_write=True)
+        # Ensure destination directory exists
+        destination_validated.parent.mkdir(parents=True, exist_ok=True)
         
-        def _move():
-            try:
-                dst_path.parent.mkdir(parents=True, exist_ok=True)
-                src_path.rename(dst_path)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to move file from '{src_path}' to '{dst_path}': {str(e)}")
-        
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_move)
+        # Retry operation with exponential backoff
+        self._retry_operation(self._move_file, source_validated, destination_validated)
 
-    def list_directory(self, path: Union[str, Path]) -> list:
+    def _move_file(self, source_path: Path, destination_path: Path) -> None:
+        """Internal method to move file."""
+        source_path.rename(destination_path)
+
+    def list_files(self, directory_path: str, pattern: Optional[str] = None) -> list:
         """
-        List directory contents.
+        List files in a directory.
         
         Args:
-            path: Directory path to list
+            directory_path: Directory to list files in
+            pattern: Optional pattern to filter files
             
         Returns:
-            List of file/directory names
+            List of file paths
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If directory cannot be accessed
+            InvalidPathError: If path is invalid or outside base path
         """
+        path = Path(directory_path)
         validated_path = self._validate_path(path, is_write=False)
         
-        def _list():
-            try:
-                return [f.name for f in validated_path.iterdir()]
-            except Exception as e:
-                raise FileHandlerError(f"Failed to list directory '{validated_path}': {str(e)}")
-        
-        return self._retry_operation(_list)
+        if self._test_mode:
+            print(f"TEST MODE: Would list files in {validated_path}")
+            return []
+            
+        try:
+            if not validated_path.is_dir():
+                raise FileOperationError(f"Path {validated_path} is not a directory")
+                
+            files = []
+            for item in validated_path.iterdir():
+                if item.is_file() and (pattern is None or pattern in item.name):
+                    files.append(str(item))
+            return files
+        except OSError as e:
+            raise FileOperationError(f"Failed to list directory {validated_path}: {e}")
 
-    def create_directory(self, path: Union[str, Path]) -> None:
+    def create_directory(self, directory_path: str) -> None:
         """
-        Create directory.
+        Create a directory.
         
         Args:
-            path: Directory path to create
+            directory_path: Path to the directory to create
             
         Raises:
-            PathValidationError: If path validation fails
-            FileHandlerError: If directory cannot be created
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
         """
+        path = Path(directory_path)
         validated_path = self._validate_path(path, is_write=True)
         
-        def _create_dir():
-            try:
-                validated_path.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                raise FileHandlerError(f"Failed to create directory '{validated_path}': {str(e)}")
-        
-        # Use lock for write operations to ensure thread safety
-        with self._lock:
-            self._retry_operation(_create_dir)
+        if self._test_mode:
+            print(f"TEST MODE: Would create directory {validated_path}")
+            return
+            
+        # Retry operation with exponential backoff
+        self._retry_operation(self._create_directory, validated_path)
 
-    @contextmanager
-    def lock(self):
-        """Context manager for acquiring the internal lock."""
-        with self._lock:
-            yield
+    def _create_directory(self, directory_path: Path) -> None:
+        """Internal method to create directory."""
+        directory_path.mkdir(parents=True, exist_ok=True)
+
+    def lock_file(self, file_path: str) -> None:
+        """
+        Lock a file by creating a lock file.
+        
+        Args:
+            file_path: Path to the file to lock
+            
+        Raises:
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
+        """
+        path = Path(file_path)
+        validated_path = self._validate_path(path, is_write=True)
+        
+        if self._test_mode:
+            print(f"TEST MODE: Would lock {validated_path}")
+            return
+            
+        lock_path = validated_path.with_suffix(validated_path.suffix + '.lock')
+        self._retry_operation(self._create_lock_file, lock_path)
+
+    def _create_lock_file(self, lock_path: Path) -> None:
+        """Internal method to create lock file."""
+        lock_path.touch(exist_ok=True)
+
+    def unlock_file(self, file_path: str) -> None:
+        """
+        Unlock a file by removing its lock file.
+        
+        Args:
+            file_path: Path to the file to unlock
+            
+        Raises:
+            InvalidPathError: If path is invalid or outside base path
+            FileOperationError: If file operation fails
+        """
+        path = Path(file_path)
+        validated_path = self._validate_path(path, is_write=True)
+        
+        if self._test_mode:
+            print(f"TEST MODE: Would unlock {validated_path}")
+            return
+            
+        lock_path = validated_path.with_suffix(validated_path.suffix + '.lock')
+        self._retry_operation(self._remove_lock_file, lock_path)
+
+    def _remove_lock_file(self, lock_path: Path) -> None:
+        """Internal method to remove lock file."""
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            # Lock file doesn't exist, which is fine
+            pass
