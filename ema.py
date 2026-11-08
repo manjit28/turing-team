@@ -38,7 +38,7 @@ def exponential_moving_average(values: List[float], span: int, min_periods: Opti
     ema = None
     
     for i, value in enumerate(values):
-        if i < min_periods if min_periods is not None else i < 1:
+        if i < min_periods - 1 if min_periods is not None else i < 0:
             # Not enough data points yet
             result.append(None)
         elif i == min_periods - 1 if min_periods is not None else i == 0:
