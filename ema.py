@@ -23,7 +23,7 @@ def exponential_moving_average(values: List[float], span: int, min_periods: Opti
         
     Example:
         For values=[1,2,3,4,5], span=2, min_periods=3, the expected EMA list is 
-        [None, None, 2.0, 3.0, 4.0]
+        [None, None, 2.0, 10/3, 40/9]
     """
     if not values:
         return []
