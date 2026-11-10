@@ -42,6 +42,34 @@ def moving_average(data, window, min_periods=None):
     return result
 
 
+def weighted_moving_average(values, weights):
+    """
+    Calculate rolling weighted moving average.
+    
+    Args:
+        values: List of numbers
+        weights: List of weights in chronological order
+        
+    Returns:
+        List of weighted moving averages with same length as values, padded with None for insufficient data
+    """
+    if not weights:
+        raise ValueError("weights must be non-empty")
+    weight_sum = sum(weights)
+    if weight_sum == 0:
+        raise ValueError("sum of weights must be non-zero")
+    window = len(weights)
+    result = []
+    for i in range(len(values)):
+        if i + 1 < window:
+            result.append(None)
+        else:
+            window_values = values[i - window + 1:i + 1]
+            weighted_sum = sum(v * w for v, w in zip(window_values, weights))
+            result.append(weighted_sum / weight_sum)
+    return result
+
+
 if __name__ == "__main__":
     # Test example
     test_data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
